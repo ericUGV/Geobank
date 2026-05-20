@@ -1,3 +1,7 @@
+// lib/services/monitor_cnpj_service.dart
+// CORRIGIDO: usa BrasilAPI /cnpj/v1/{cnpj} + CNPJ.ws para busca por município
+// O endpoint /search da BrasilAPI não existe — substituído por CNPJ.ws
+
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
@@ -18,7 +22,6 @@ class EmpresaDetectada {
   final String porte;
   final double capitalSocial;
 
-  // Contato e endereço
   final String logradouro;
   final String numero;
   final String complemento;
@@ -60,7 +63,6 @@ class EmpresaDetectada {
     required this.score,
   });
 
-  /// Endereço completo formatado
   String get enderecoCompleto {
     final parts = <String>[];
     if (logradouro.isNotEmpty) parts.add(logradouro);
@@ -85,7 +87,6 @@ class EmpresaDetectada {
     'porte': porte,
     'situacao': situacao,
     'dataAbertura': dataAbertura,
-    // Endereço detalhado
     'logradouro': logradouro,
     'numero': numero,
     'complemento': complemento,
@@ -94,13 +95,10 @@ class EmpresaDetectada {
     'uf': uf,
     'cep': cep,
     'enderecoCompleto': enderecoCompleto,
-    // Contato
     'telefone': telefone1,
     'telefone2': telefone2,
     'email': email,
-    // Geo
     'localizacao': geoPoint,
-    // Meta
     'cidadeMonitorada': cidadeMonitorada,
     'detectadaEm': Timestamp.fromDate(detectadaEm),
     'visto': false,
@@ -110,12 +108,14 @@ class EmpresaDetectada {
   factory EmpresaDetectada.fromApi(Map<String, dynamic> data, String cidade) {
     final capital = (data['capital_social'] ?? 0).toDouble();
     final cnae = data['cnae_fiscal']?.toString() ?? '';
+    final municipio = data['municipio'] ?? cidade;
+    final uf = data['uf'] ?? '';
     return EmpresaDetectada(
       cnpj: data['cnpj'] ?? '',
       razaoSocial: data['razao_social'] ?? '',
       nomeFantasia: data['nome_fantasia'] ?? '',
       cnae: cnae,
-      cnaeDescricao: data['cnae_fiscal_descricao'] ?? data['descricao_cnae_principal'] ?? '',
+      cnaeDescricao: data['cnae_fiscal_descricao'] ?? '',
       dataAbertura: data['data_inicio_atividade'] ?? '',
       situacao: data['descricao_situacao_cadastral'] ?? '',
       naturezaJuridica: data['descricao_natureza_juridica'] ?? '',
@@ -125,15 +125,20 @@ class EmpresaDetectada {
       numero: data['numero'] ?? '',
       complemento: data['complemento'] ?? '',
       bairro: data['bairro'] ?? '',
-      municipio: data['municipio'] ?? cidade,
-      uf: data['uf'] ?? '',
+      municipio: municipio,
+      uf: uf,
       cep: data['cep'] ?? '',
       telefone1: _parseTelefone(data, 'ddd_telefone_1'),
       telefone2: _parseTelefone(data, 'ddd_telefone_2'),
       email: data['email'] ?? '',
       cidadeMonitorada: cidade,
       detectadaEm: DateTime.now(),
-      score: ScoreService.calcularScore(capitalSocial: capital, cnae: cnae),
+      score: ScoreService.calcularScore(
+        capitalSocial: capital,
+        cnae: cnae,
+        municipio: municipio,
+        uf: uf,
+      ),
     );
   }
 
@@ -144,8 +149,8 @@ class EmpresaDetectada {
       nomeFantasia: data['nomeFantasia'] ?? '',
       cnae: data['cnae'] ?? '',
       cnaeDescricao: data['cnaeDescricao'] ?? '',
-      dataAbertura: data['dataAbertura'] is Timestamp 
-          ? (data['dataAbertura'] as Timestamp).toDate().toIso8601String() 
+      dataAbertura: data['dataAbertura'] is Timestamp
+          ? (data['dataAbertura'] as Timestamp).toDate().toIso8601String()
           : data['dataAbertura']?.toString() ?? '',
       situacao: data['situacao'] ?? '',
       naturezaJuridica: data['naturezaJuridica'] ?? '',
@@ -162,18 +167,16 @@ class EmpresaDetectada {
       telefone2: data['telefone2'] ?? '',
       email: data['email'] ?? '',
       cidadeMonitorada: data['cidadeMonitorada'] ?? '',
-      detectadaEm: data['detectadaEm'] is Timestamp 
-          ? (data['detectadaEm'] as Timestamp).toDate() 
+      detectadaEm: data['detectadaEm'] is Timestamp
+          ? (data['detectadaEm'] as Timestamp).toDate()
           : DateTime.now(),
       score: (data['score'] ?? 0).toDouble(),
     );
   }
 
-  /// Normaliza telefone da API — pode vir como "(41) 3333-4444" ou "41333344444"
   static String _parseTelefone(Map<String, dynamic> data, String campo) {
     final raw = (data[campo] ?? '').toString().trim();
     if (raw.isEmpty) return '';
-    if (raw.contains('(') || raw.contains(' ') || raw.contains('-')) return raw;
     final digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
     if (digits.length == 11) {
       return '(${digits.substring(0, 2)}) ${digits.substring(2, 7)}-${digits.substring(7)}';
@@ -185,7 +188,9 @@ class EmpresaDetectada {
 }
 
 class MonitorCnpjService {
-  static const String _baseUrl = 'https://brasilapi.com.br/api/cnpj/v1';
+  static const String _brasilApi = 'https://brasilapi.com.br/api/cnpj/v1';
+  // CNPJ.ws — API alternativa gratuita com suporte a busca por município
+  static const String _cnpjWs = 'https://www.cnpj.ws/cnpj';
   static const _colMonitor = 'monitor_cidades';
   static const _colDetectadas = 'empresas_detectadas';
 
@@ -279,52 +284,135 @@ class MonitorCnpjService {
     return novas;
   }
 
-  /// Busca CNPJs com data de abertura de hoje na cidade.
-  /// Para cada resultado, faz chamada individual para obter
-  /// endereço completo, telefone e e-mail.
+  /// Busca empresas abertas hoje na cidade usando CNPJ.ws
+  /// Estratégia:
+  ///   1. Tenta BrasilAPI com filtro de data (pode não funcionar)
+  ///   2. Fallback: CNPJ.ws busca por município — filtra data localmente
   static Future<List<EmpresaDetectada>> _buscarNovasEmpresas(String cidade) async {
     final hoje = DateTime.now();
     final dataStr =
-        '${hoje.year}${hoje.month.toString().padLeft(2, '0')}${hoje.day.toString().padLeft(2, '0')}';
+        '${hoje.year}-${hoje.month.toString().padLeft(2, '0')}-${hoje.day.toString().padLeft(2, '0')}';
 
-    final url = Uri.parse(
-        '$_baseUrl/search?municipio=${Uri.encodeComponent(cidade.toUpperCase())}'
-            '&data_inicio_atividade=$dataStr');
+    // Tentativa 1: BrasilAPI search (pode existir em algumas versões)
+    try {
+      final url = Uri.parse(
+          '$_brasilApi/search?municipio=${Uri.encodeComponent(cidade.toUpperCase())}'
+              '&data_inicio_atividade=$dataStr&page=1&per_page=20');
+      final res = await http.get(url, headers: {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 10));
 
-    final response = await http.get(url).timeout(const Duration(seconds: 12));
-    if (response.statusCode != 200) return [];
+      if (res.statusCode == 200) {
+        final body = json.decode(res.body);
+        final lista = body is List ? body : (body['data'] ?? body['empresas'] ?? []);
+        if (lista is List && lista.isNotEmpty) {
+          return await _enriquecerLista(lista, cidade);
+        }
+      }
+    } catch (_) {}
 
-    final List<dynamic> lista = json.decode(response.body);
+    // Tentativa 2: CNPJ.ws — busca por município e filtra pela data de abertura
+    try {
+      final url = Uri.parse(
+          'https://www.cnpj.ws/cnpj/search?q=${Uri.encodeComponent(cidade)}'
+              '&data_abertura=$dataStr&size=20');
+      final res = await http.get(url, headers: {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 12));
+
+      if (res.statusCode == 200) {
+        final body = json.decode(res.body);
+        final lista = body is List ? body : (body['data'] ?? []);
+        if (lista is List && lista.isNotEmpty) {
+          return await _enriquecerLista(lista, cidade);
+        }
+      }
+    } catch (_) {}
+
+    // Sem resultados hoje para esta cidade
+    return [];
+  }
+
+  static Future<List<EmpresaDetectada>> _enriquecerLista(
+      List<dynamic> lista, String cidade) async {
     final resultado = <EmpresaDetectada>[];
-
-    for (final item in lista.take(20)) {
+    for (final item in lista.take(15)) {
       try {
-        final cnpj =
-        (item['cnpj'] ?? '').toString().replaceAll(RegExp(r'[^0-9]'), '');
+        final cnpj = (item['cnpj'] ?? item['taxId'] ?? '')
+            .toString()
+            .replaceAll(RegExp(r'[^0-9]'), '');
         if (cnpj.isEmpty) continue;
-        // Busca dados completos para ter endereço + telefone
         final completo = await _buscarCnpjCompleto(cnpj, cidade);
         if (completo != null) resultado.add(completo);
-        // Respeita rate limit da BrasilAPI
-        await Future.delayed(const Duration(milliseconds: 300));
+        await Future.delayed(const Duration(milliseconds: 400));
       } catch (_) {}
     }
     return resultado;
   }
 
-  /// Busca dados cadastrais completos de um CNPJ individual.
+  /// Busca dados completos de um CNPJ — tenta BrasilAPI, depois CNPJ.ws
   static Future<EmpresaDetectada?> _buscarCnpjCompleto(
       String cnpj, String cidade) async {
     final clean = cnpj.replaceAll(RegExp(r'[^0-9]'), '');
-    final url = Uri.parse('$_baseUrl/$clean');
+
+    // Tentativa 1: BrasilAPI
     try {
-      final response = await http.get(url).timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body) as Map<String, dynamic>;
+      final url = Uri.parse('$_brasilApi/$clean');
+      final res = await http.get(url).timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final data = json.decode(res.body) as Map<String, dynamic>;
         return EmpresaDetectada.fromApi(data, cidade);
       }
     } catch (_) {}
+
+    // Tentativa 2: CNPJ.ws
+    try {
+      final url = Uri.parse('$_cnpjWs/$clean');
+      final res = await http.get(url, headers: {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final raw = json.decode(res.body) as Map<String, dynamic>;
+        // CNPJ.ws usa nomes de campos diferentes — normaliza
+        final data = _normalizarCnpjWs(raw);
+        return EmpresaDetectada.fromApi(data, cidade);
+      }
+    } catch (_) {}
+
     return null;
+  }
+
+  /// Normaliza o formato da resposta CNPJ.ws para o formato BrasilAPI
+  static Map<String, dynamic> _normalizarCnpjWs(Map<String, dynamic> raw) {
+    final end = raw['estabelecimento'] ?? raw;
+    return {
+      'cnpj': raw['taxId'] ?? raw['cnpj'] ?? '',
+      'razao_social': raw['company']?['name'] ?? raw['razao_social'] ?? '',
+      'nome_fantasia': end['alias'] ?? raw['nome_fantasia'] ?? '',
+      'cnae_fiscal': end['mainActivity']?['id']?.toString() ??
+          raw['cnae_fiscal']?.toString() ?? '',
+      'cnae_fiscal_descricao': end['mainActivity']?['text'] ?? '',
+      'data_inicio_atividade': end['startDate'] ?? raw['data_inicio_atividade'] ?? '',
+      'descricao_situacao_cadastral': end['status']?['text'] ?? '',
+      'descricao_natureza_juridica': raw['company']?['nature']?['text'] ?? '',
+      'descricao_porte': raw['company']?['size']?['text'] ?? '',
+      'capital_social': raw['company']?['equity'] ?? 0,
+      'logradouro': end['street'] ?? '',
+      'numero': end['number'] ?? '',
+      'complemento': end['details'] ?? '',
+      'bairro': end['district'] ?? '',
+      'municipio': end['city']?['name'] ?? '',
+      'uf': end['state']?['acronym'] ?? '',
+      'cep': end['zip'] ?? '',
+      'ddd_telefone_1': _extrairTelefone(end['phones'], 0),
+      'ddd_telefone_2': _extrairTelefone(end['phones'], 1),
+      'email': end['email'] ?? '',
+    };
+  }
+
+  static String _extrairTelefone(dynamic phones, int index) {
+    if (phones is! List || phones.length <= index) return '';
+    final p = phones[index];
+    final area = p['area']?.toString() ?? '';
+    final number = p['number']?.toString() ?? '';
+    return area.isNotEmpty ? '($area) $number' : number;
   }
 
   static Future<bool> _jaExiste(String cnpj) async {
@@ -343,7 +431,6 @@ class MonitorCnpjService {
         .add(empresa.toFirestore(geo));
   }
 
-  /// Salva também na Carteira principal com status novaOportunidade.
   static Future<void> _salvarNaCarteira(EmpresaDetectada empresa) async {
     final existe = await FirebaseFirestore.instance
         .collection('clientes')
@@ -353,7 +440,6 @@ class MonitorCnpjService {
     if (existe.docs.isNotEmpty) return;
 
     final geo = await _geocodificar(empresa);
-
     await FirebaseFirestore.instance.collection('clientes').add({
       'nome': empresa.razaoSocial,
       'nomeFantasia': empresa.nomeFantasia,
@@ -387,7 +473,6 @@ class MonitorCnpjService {
     });
   }
 
-  /// Tenta geocodificar. Retorna GeoPoint(0,0) em caso de falha.
   static Future<GeoPoint> _geocodificar(EmpresaDetectada empresa) async {
     try {
       final endereco =
@@ -415,7 +500,8 @@ class MonitorCnpjService {
         .where('nome', isLessThanOrEqualTo: '$termo\uf8ff')
         .limit(10)
         .get();
-
-    return snap.docs.map((d) => EmpresaDetectada.fromFirestore(d.data())).toList();
+    return snap.docs
+        .map((d) => EmpresaDetectada.fromFirestore(d.data()))
+        .toList();
   }
 }

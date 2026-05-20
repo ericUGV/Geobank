@@ -1,9 +1,12 @@
+// lib/screens/home_screen.dart
+// ATUALIZADO: aba "Monitorar" agora usa MonitorScreen (funcional) no lugar de CadastroEmpresaScreen
+
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../theme/app_theme.dart';
 import 'dashboard_screen.dart';
 import 'mapa_screen.dart';
-import 'cadastro_empresa_screen.dart';
+import 'monitor_screen.dart';
 import 'lista_empresas_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -17,7 +20,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Widget> _screens = [
     DashboardScreen(),
     MapaScreen(),
-    CadastroEmpresaScreen(),
+    const MonitorScreen(),
     ListaEmpresasScreen(),
   ];
 
@@ -45,9 +48,9 @@ class _HomeScreenState extends State<HomeScreen> {
             label: 'Mapa GPS',
           ),
           NavigationDestination(
-            icon: Icon(Icons.add_business_outlined),
-            selectedIcon: Icon(Icons.add_business, color: AppColors.primary),
-            label: 'Monitorar',
+            icon: Icon(Icons.radar_outlined),
+            selectedIcon: Icon(Icons.radar, color: AppColors.primary),
+            label: 'Monitor',
           ),
           NavigationDestination(
             icon: Icon(Icons.list_alt_outlined),
