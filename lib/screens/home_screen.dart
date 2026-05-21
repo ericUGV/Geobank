@@ -2,10 +2,9 @@
 // ATUALIZADO: aba "Monitorar" agora usa MonitorScreen (funcional) no lugar de CadastroEmpresaScreen
 
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import '../theme/app_theme.dart';
 import 'dashboard_screen.dart';
-import 'mapa_screen.dart';
+import 'map_screen.dart';
 import 'monitor_screen.dart';
 import 'lista_empresas_screen.dart';
 

@@ -1,6 +1,6 @@
 // lib/screens/mapa_screen.dart
-// ATUALIZADO: adicionado filtro por banco domicílio + botão de rota múltipla
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -15,6 +15,9 @@ class MapaScreen extends StatefulWidget {
 }
 
 class _MapaScreenState extends State<MapaScreen> {
+  // FIX: StreamSubscription para cancelar antes de criar nova — evita memory leak e listeners duplos
+  StreamSubscription<QuerySnapshot>? _subscription;
+
   Set<Marker> _markers = {};
   double _raioFiltro = 10000;
   Position? _minhaPosicao;
@@ -23,23 +26,14 @@ class _MapaScreenState extends State<MapaScreen> {
   bool _showFilters = false;
   int _totalVisible = 0;
 
-  // Bancos mais comuns para filtro
   final List<String> _bancosDisponiveis = [
-    'todos',
-    'Banco do Brasil',
-    'Itaú',
-    'Bradesco',
-    'Caixa',
-    'Santander',
-    'Sicredi',
-    'Sicoob',
-    'Nubank',
-    'Outro',
+    'todos', 'Banco do Brasil', 'Itaú', 'Bradesco',
+    'Caixa', 'Santander', 'Sicredi', 'Sicoob', 'Nubank', 'Outro',
   ];
 
   final List<Map<String, dynamic>> _raioOptions = [
-    {'label': '2km', 'value': 2000.0},
-    {'label': '5km', 'value': 5000.0},
+    {'label': '2km',  'value': 2000.0},
+    {'label': '5km',  'value': 5000.0},
     {'label': '10km', 'value': 10000.0},
     {'label': '25km', 'value': 25000.0},
   ];
@@ -48,6 +42,13 @@ class _MapaScreenState extends State<MapaScreen> {
   void initState() {
     super.initState();
     _determinarPosicao();
+  }
+
+  @override
+  void dispose() {
+    // FIX: cancela subscription ao sair da tela
+    _subscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _determinarPosicao() async {
@@ -60,48 +61,48 @@ class _MapaScreenState extends State<MapaScreen> {
       if (permission == LocationPermission.denied) return;
     }
 
-    Position position = await Geolocator.getCurrentPosition();
+    final position = await Geolocator.getCurrentPosition();
+    if (!mounted) return;
     setState(() => _minhaPosicao = position);
     _carregarEmpresas();
   }
 
   double _getMarkerHue(String status) {
     switch (status) {
-      case 'clienteBB_Minha':
-        return BitmapDescriptor.hueAzure;
-      case 'clienteBB_Outra':
-        return BitmapDescriptor.hueYellow;
-      case 'concorrente':
-        return BitmapDescriptor.hueRed;
-      case 'novaOportunidade':
-        return BitmapDescriptor.hueViolet;
-      default:
-        return 200;
+      case 'clienteBB_Minha':   return BitmapDescriptor.hueAzure;
+      case 'clienteBB_Outra':   return BitmapDescriptor.hueYellow;
+      case 'concorrente':       return BitmapDescriptor.hueRed;
+      case 'novaOportunidade':  return BitmapDescriptor.hueViolet;
+      default:                  return 200;
     }
   }
 
   void _carregarEmpresas() {
-    FirebaseFirestore.instance.collection('clientes').snapshots().listen((snapshot) {
-      Set<Marker> localMarkers = {};
+    // FIX: cancela a subscription anterior antes de criar uma nova
+    _subscription?.cancel();
+
+    _subscription = FirebaseFirestore.instance
+        .collection('clientes')
+        .snapshots()
+        .listen((snapshot) {
+      // FIX: guarda resultado em variáveis locais, só chama setState se mounted
+      final Set<Marker> localMarkers = {};
       int count = 0;
 
-      for (var doc in snapshot.docs) {
+      for (final doc in snapshot.docs) {
         final data = doc.data();
         final GeoPoint? point = data['localizacao'];
         if (point == null) continue;
 
-        // Filtro por status
         if (_filtroStatus != 'todos' && data['status'] != _filtroStatus) continue;
 
-        // Filtro por banco domicílio
         if (_filtroBanco != 'todos') {
           final banco = (data['bancoDomicilio'] ?? '').toString();
           if (!banco.toLowerCase().contains(_filtroBanco.toLowerCase())) continue;
         }
 
-        // Filtro por raio
         if (_minhaPosicao != null) {
-          double distancia = Geolocator.distanceBetween(
+          final distancia = Geolocator.distanceBetween(
             _minhaPosicao!.latitude, _minhaPosicao!.longitude,
             point.latitude, point.longitude,
           );
@@ -109,23 +110,22 @@ class _MapaScreenState extends State<MapaScreen> {
         }
 
         count++;
-        localMarkers.add(
-          Marker(
-            markerId: MarkerId(doc.id),
-            position: LatLng(point.latitude, point.longitude),
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-                _getMarkerHue(data['status'] ?? '')),
-            infoWindow: InfoWindow(
-              title: data['nome'],
-              snippet: data['bancoDomicilio'] != null
-                  ? '🏦 ${data['bancoDomicilio']} — Toque para navegar'
-                  : 'Toque para navegar',
-              onTap: () => NavigationService.abrirRota(point, data['nome']),
-            ),
+        localMarkers.add(Marker(
+          markerId: MarkerId(doc.id),
+          position: LatLng(point.latitude, point.longitude),
+          icon: BitmapDescriptor.defaultMarkerWithHue(_getMarkerHue(data['status'] ?? '')),
+          infoWindow: InfoWindow(
+            title: data['nome'],
+            snippet: data['bancoDomicilio'] != null
+                ? '🏦 ${data['bancoDomicilio']} — Toque para navegar'
+                : 'Toque para navegar',
+            onTap: () => NavigationService.abrirRota(point, data['nome']),
           ),
-        );
+        ));
       }
 
+      // FIX: mounted check antes do setState
+      if (!mounted) return;
       setState(() {
         _markers = localMarkers;
         _totalVisible = count;
@@ -139,12 +139,11 @@ class _MapaScreenState extends State<MapaScreen> {
       backgroundColor: AppColors.surface,
       body: Stack(
         children: [
-          // Mapa
           GoogleMap(
             initialCameraPosition: CameraPosition(
               target: _minhaPosicao != null
                   ? LatLng(_minhaPosicao!.latitude, _minhaPosicao!.longitude)
-                  : const LatLng(-29.6883, -53.8071),
+                  : const LatLng(-25.8733, -50.3867),
               zoom: 13,
             ),
             markers: _markers,
@@ -153,113 +152,75 @@ class _MapaScreenState extends State<MapaScreen> {
             zoomControlsEnabled: false,
           ),
 
-          // Overlay superior
           SafeArea(
             child: Column(
               children: [
-                // Header bar
+                // Header
                 Container(
                   margin: const EdgeInsets.all(12),
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(16),
-                    boxShadow: [
-                      BoxShadow(
-                          color: Colors.black.withOpacity(0.1),
-                          blurRadius: 12,
-                          offset: const Offset(0, 4))
-                    ],
+                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 12, offset: const Offset(0, 4))],
                   ),
                   child: Row(
                     children: [
-                      const Icon(Icons.map_outlined,
-                          color: AppColors.primary, size: 20),
+                      const Icon(Icons.map_outlined, color: AppColors.primary, size: 20),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text('GPS de Prospecção',
-                                style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 15,
-                                    color: AppColors.textPrimary)),
+                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: AppColors.textPrimary)),
                             Text(
                               '$_totalVisible empresa(s) visível(is)'
                                   '${_filtroBanco != 'todos' ? ' · $_filtroBanco' : ''}',
-                              style: const TextStyle(
-                                  fontSize: 12,
-                                  color: AppColors.textSecondary),
+                              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
                             ),
                           ],
                         ),
                       ),
                       // Botão rota múltipla
                       GestureDetector(
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                              builder: (_) => const RotaMultiplaScreen()),
-                        ),
+                        onTap: () => Navigator.push(context,
+                            MaterialPageRoute(builder: (_) => const RotaMultiplaScreen())),
                         child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 6),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                           margin: const EdgeInsets.only(right: 8),
                           decoration: BoxDecoration(
                             color: AppColors.accent.withOpacity(0.15),
                             borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                                color: AppColors.accent.withOpacity(0.4)),
+                            border: Border.all(color: AppColors.accent.withOpacity(0.4)),
                           ),
                           child: const Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(Icons.route,
-                                  size: 15, color: AppColors.primary),
+                              Icon(Icons.route, size: 15, color: AppColors.primary),
                               SizedBox(width: 4),
-                              Text('Rota',
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.primary)),
+                              Text('Rota', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.primary)),
                             ],
                           ),
                         ),
                       ),
                       // Botão filtros
                       GestureDetector(
-                        onTap: () =>
-                            setState(() => _showFilters = !_showFilters),
+                        onTap: () => setState(() => _showFilters = !_showFilters),
                         child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 6),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                           decoration: BoxDecoration(
-                            color: _showFilters
-                                ? AppColors.primary
-                                : AppColors.surface,
+                            color: _showFilters ? AppColors.primary : AppColors.surface,
                             borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                                color: _showFilters
-                                    ? AppColors.primary
-                                    : AppColors.divider),
+                            border: Border.all(color: _showFilters ? AppColors.primary : AppColors.divider),
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(Icons.tune,
-                                  size: 16,
-                                  color: _showFilters
-                                      ? Colors.white
-                                      : AppColors.textSecondary),
+                              Icon(Icons.tune, size: 16, color: _showFilters ? Colors.white : AppColors.textSecondary),
                               const SizedBox(width: 4),
-                              Text('Filtros',
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                      color: _showFilters
-                                          ? Colors.white
-                                          : AppColors.textSecondary)),
+                              Text('Filtros', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                                  color: _showFilters ? Colors.white : AppColors.textSecondary)),
                             ],
                           ),
                         ),
@@ -276,22 +237,12 @@ class _MapaScreenState extends State<MapaScreen> {
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(16),
-                      boxShadow: [
-                        BoxShadow(
-                            color: Colors.black.withOpacity(0.08),
-                            blurRadius: 10,
-                            offset: const Offset(0, 4))
-                      ],
+                      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10, offset: const Offset(0, 4))],
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Raio
-                        const Text('Raio de busca',
-                            style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.textPrimary)),
+                        const Text('Raio de busca', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                         const SizedBox(height: 8),
                         Row(
                           children: _raioOptions.map((opt) {
@@ -299,74 +250,37 @@ class _MapaScreenState extends State<MapaScreen> {
                             return Padding(
                               padding: const EdgeInsets.only(right: 8),
                               child: GestureDetector(
-                                onTap: () {
-                                  setState(() => _raioFiltro = opt['value']);
-                                  _carregarEmpresas();
-                                },
+                                onTap: () { setState(() => _raioFiltro = opt['value']); _carregarEmpresas(); },
                                 child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 14, vertical: 7),
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
                                   decoration: BoxDecoration(
-                                    color: sel
-                                        ? AppColors.primary
-                                        : AppColors.surface,
+                                    color: sel ? AppColors.primary : AppColors.surface,
                                     borderRadius: BorderRadius.circular(20),
-                                    border: Border.all(
-                                        color: sel
-                                            ? AppColors.primary
-                                            : AppColors.divider),
+                                    border: Border.all(color: sel ? AppColors.primary : AppColors.divider),
                                   ),
-                                  child: Text(opt['label'],
-                                      style: TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w600,
-                                          color: sel
-                                              ? Colors.white
-                                              : AppColors.textSecondary)),
+                                  child: Text(opt['label'], style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                                      color: sel ? Colors.white : AppColors.textSecondary)),
                                 ),
                               ),
                             );
                           }).toList(),
                         ),
                         const SizedBox(height: 14),
-
-                        // Status
-                        const Text('Status',
-                            style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.textPrimary)),
+                        const Text('Status', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                         const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            _statusChip('todos', 'Todos', AppColors.primary),
-                            _statusChip('clienteBB_Minha', 'Minha Carteira',
-                                AppColors.statusMinhaCarteira),
-                            _statusChip('clienteBB_Outra', 'Outra Carteira',
-                                AppColors.statusOutraCarteira),
-                            _statusChip('concorrente', 'Concorrente',
-                                AppColors.statusConcorrente),
-                            _statusChip('novaOportunidade', 'Nova Empresa',
-                                AppColors.statusNovaEmpresa),
-                            _statusChip('leadFrio', 'Lead Frio',
-                                AppColors.statusLeadFrio),
-                          ],
-                        ),
-
+                        Wrap(spacing: 8, runSpacing: 8, children: [
+                          _statusChip('todos',            'Todos',          AppColors.primary),
+                          _statusChip('clienteBB_Minha',  'Minha Carteira', AppColors.statusMinhaCarteira),
+                          _statusChip('clienteBB_Outra',  'Outra Carteira', AppColors.statusOutraCarteira),
+                          _statusChip('concorrente',       'Concorrente',    AppColors.statusConcorrente),
+                          _statusChip('novaOportunidade',  'Nova Empresa',   AppColors.statusNovaEmpresa),
+                          _statusChip('leadFrio',          'Lead Frio',      AppColors.statusLeadFrio),
+                        ]),
                         const SizedBox(height: 14),
-
-                        // ── NOVO: Banco Domicílio ──────────────────────────
-                        const Text('Banco domicílio',
-                            style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.textPrimary)),
+                        const Text('Banco domicílio', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                         const SizedBox(height: 8),
                         Container(
-                          padding:
-                          const EdgeInsets.symmetric(horizontal: 12),
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
                           decoration: BoxDecoration(
                             color: AppColors.surface,
                             borderRadius: BorderRadius.circular(10),
@@ -376,22 +290,13 @@ class _MapaScreenState extends State<MapaScreen> {
                             child: DropdownButton<String>(
                               isExpanded: true,
                               value: _filtroBanco,
-                              items: _bancosDisponiveis
-                                  .map((b) => DropdownMenuItem(
+                              items: _bancosDisponiveis.map((b) => DropdownMenuItem(
                                 value: b,
-                                child: Text(
-                                  b == 'todos' ? 'Todos os bancos' : b,
-                                  style: const TextStyle(
-                                      fontSize: 13,
-                                      color: AppColors.textPrimary),
-                                ),
-                              ))
-                                  .toList(),
+                                child: Text(b == 'todos' ? 'Todos os bancos' : b,
+                                    style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
+                              )).toList(),
                               onChanged: (v) {
-                                if (v != null) {
-                                  setState(() => _filtroBanco = v);
-                                  _carregarEmpresas();
-                                }
+                                if (v != null) { setState(() => _filtroBanco = v); _carregarEmpresas(); }
                               },
                             ),
                           ),
@@ -403,40 +308,31 @@ class _MapaScreenState extends State<MapaScreen> {
             ),
           ),
 
-          // Legenda inferior
+          // Legenda
           Positioned(
-            bottom: 20,
-            left: 12,
-            right: 12,
+            bottom: 20, left: 12, right: 12,
             child: Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(14),
-                boxShadow: [
-                  BoxShadow(
-                      color: Colors.black.withOpacity(0.08),
-                      blurRadius: 10,
-                      offset: const Offset(0, -2))
-                ],
+                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10, offset: const Offset(0, -2))],
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: [
-                  _legendDot('Minha Cart.', AppColors.statusMinhaCarteira),
-                  _legendDot('Outra Cart.', AppColors.statusOutraCarteira),
-                  _legendDot('Concorrente', AppColors.statusConcorrente),
-                  _legendDot('Nova Emp.', AppColors.statusNovaEmpresa),
-                  _legendDot('Lead Frio', AppColors.statusLeadFrio),
+                  _legendDot('Minha Cart.',  AppColors.statusMinhaCarteira),
+                  _legendDot('Outra Cart.',  AppColors.statusOutraCarteira),
+                  _legendDot('Concorrente',  AppColors.statusConcorrente),
+                  _legendDot('Nova Emp.',    AppColors.statusNovaEmpresa),
+                  _legendDot('Lead Frio',    AppColors.statusLeadFrio),
                 ],
               ),
             ),
           ),
 
-          // FAB localização
           Positioned(
-            bottom: 90,
-            right: 16,
+            bottom: 90, right: 16,
             child: FloatingActionButton.small(
               onPressed: _determinarPosicao,
               backgroundColor: Colors.white,
@@ -453,10 +349,7 @@ class _MapaScreenState extends State<MapaScreen> {
   Widget _statusChip(String key, String label, Color color) {
     final sel = _filtroStatus == key;
     return GestureDetector(
-      onTap: () {
-        setState(() => _filtroStatus = key);
-        _carregarEmpresas();
-      },
+      onTap: () { setState(() => _filtroStatus = key); _carregarEmpresas(); },
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
@@ -464,11 +357,8 @@ class _MapaScreenState extends State<MapaScreen> {
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: sel ? color : AppColors.divider),
         ),
-        child: Text(label,
-            style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: sel ? Colors.white : AppColors.textSecondary)),
+        child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+            color: sel ? Colors.white : AppColors.textSecondary)),
       ),
     );
   }
@@ -476,15 +366,9 @@ class _MapaScreenState extends State<MapaScreen> {
   Widget _legendDot(String label, Color color) => Row(
     mainAxisSize: MainAxisSize.min,
     children: [
-      Container(
-          width: 8,
-          height: 8,
-          decoration:
-          BoxDecoration(color: color, shape: BoxShape.circle)),
+      Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
       const SizedBox(width: 4),
-      Text(label,
-          style: const TextStyle(
-              fontSize: 10, color: AppColors.textSecondary)),
+      Text(label, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary)),
     ],
   );
 }

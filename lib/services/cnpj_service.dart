@@ -40,7 +40,7 @@ class CnpjService {
         final uf = data['uf']?.toString() ?? '';
         double score = ScoreService.calcularScore(
           capitalSocial: (data['capital_social'] ?? 0).toDouble(),
-          cnae: data['cnae_fiscal'].toString(),
+          cnae: data['cnae_fiscal']?.toString() ?? '',
           municipio: municipio,
           uf: uf,
         );
@@ -50,7 +50,7 @@ class CnpjService {
           'nomeFantasia': data['nome_fantasia'] ?? '',
           'cnpj': cleanCnpj,
           'cnae': data['cnae_fiscal_descricao'] ??
-              data['cnae_fiscal'].toString(),
+              data['cnae_fiscal']?.toString() ?? '',
           'capitalSocial': data['capital_social'] ?? 0,
           'status': 'novaOportunidade',
           'localizacao': geoPoint,

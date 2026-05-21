@@ -5,6 +5,7 @@ import 'firebase_options.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'theme/app_theme.dart';
+import 'services/score_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
