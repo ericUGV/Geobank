@@ -23,8 +23,34 @@ class _MapaScreenState extends State<MapaScreen> {
   Position? _minhaPosicao;
   String _filtroStatus = 'todos';
   String _filtroBanco = 'todos';
+  String _filtroCnae = 'todos';
+  String _filtroVisita = 'todos'; // 'todos' | '7' | '30' | '90' | 'nunca'
   bool _showFilters = false;
   int _totalVisible = 0;
+
+  // Segmentos CNAE principais (prefixo 2 dígitos)
+  final List<Map<String, String>> _cnaeOptions = [
+    {'key': 'todos', 'label': 'Todos os segmentos'},
+    {'key': '01',    'label': '01 · Agropecuária'},
+    {'key': '10',    'label': '10 · Alimentos'},
+    {'key': '41',    'label': '41-43 · Construção'},
+    {'key': '46',    'label': '46 · Atacadista'},
+    {'key': '47',    'label': '47 · Varejista'},
+    {'key': '49',    'label': '49 · Transporte'},
+    {'key': '56',    'label': '56 · Alimentação'},
+    {'key': '64',    'label': '64 · Financeiro'},
+    {'key': '68',    'label': '68 · Imobiliário'},
+    {'key': '86',    'label': '86 · Saúde'},
+  ];
+
+  final List<Map<String, String>> _visitaOptions = [
+    {'key': 'todos',  'label': 'Qualquer data'},
+    {'key': '7',      'label': 'Visitado nos últimos 7 dias'},
+    {'key': '30',     'label': 'Visitado nos últimos 30 dias'},
+    {'key': '90',     'label': 'Visitado nos últimos 90 dias'},
+    {'key': 'vencido','label': 'Sem visita há mais de 30 dias'},
+    {'key': 'nunca',  'label': 'Nunca visitado'},
+  ];
 
   final List<String> _bancosDisponiveis = [
     'todos', 'Banco do Brasil', 'Itaú', 'Bradesco',
@@ -99,6 +125,32 @@ class _MapaScreenState extends State<MapaScreen> {
         if (_filtroBanco != 'todos') {
           final banco = (data['bancoDomicilio'] ?? '').toString();
           if (!banco.toLowerCase().contains(_filtroBanco.toLowerCase())) continue;
+        }
+
+        // FIX: filtro por segmento CNAE (prefixo 2 dígitos)
+        if (_filtroCnae != 'todos') {
+          final cnae = (data['cnae'] ?? '').toString();
+          if (!cnae.startsWith(_filtroCnae)) continue;
+        }
+
+        // FIX: filtro por data de última visita
+        if (_filtroVisita != 'todos') {
+          final ultimaVisita = data['ultimaVisita'];
+          final agora = DateTime.now();
+          if (_filtroVisita == 'nunca') {
+            if (ultimaVisita != null) continue;
+          } else if (_filtroVisita == 'vencido') {
+            if (ultimaVisita == null) continue;
+            DateTime? dt;
+            if (ultimaVisita is String) dt = DateTime.tryParse(ultimaVisita);
+            if (dt == null || agora.difference(dt).inDays <= 30) continue;
+          } else {
+            final dias = int.tryParse(_filtroVisita) ?? 9999;
+            if (ultimaVisita == null) continue;
+            DateTime? dt;
+            if (ultimaVisita is String) dt = DateTime.tryParse(ultimaVisita);
+            if (dt == null || agora.difference(dt).inDays > dias) continue;
+          }
         }
 
         if (_minhaPosicao != null) {
@@ -297,6 +349,56 @@ class _MapaScreenState extends State<MapaScreen> {
                               )).toList(),
                               onChanged: (v) {
                                 if (v != null) { setState(() => _filtroBanco = v); _carregarEmpresas(); }
+                              },
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        const Text('Segmento (CNAE)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          decoration: BoxDecoration(
+                            color: AppColors.surface,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: _filtroCnae != 'todos' ? AppColors.primary : AppColors.divider),
+                          ),
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<String>(
+                              isExpanded: true,
+                              value: _filtroCnae,
+                              items: _cnaeOptions.map((opt) => DropdownMenuItem(
+                                value: opt['key'],
+                                child: Text(opt['label']!,
+                                    style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
+                              )).toList(),
+                              onChanged: (v) {
+                                if (v != null) { setState(() => _filtroCnae = v); _carregarEmpresas(); }
+                              },
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        const Text('Última visita', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          decoration: BoxDecoration(
+                            color: AppColors.surface,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: _filtroVisita != 'todos' ? AppColors.primary : AppColors.divider),
+                          ),
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<String>(
+                              isExpanded: true,
+                              value: _filtroVisita,
+                              items: _visitaOptions.map((opt) => DropdownMenuItem(
+                                value: opt['key'],
+                                child: Text(opt['label']!,
+                                    style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
+                              )).toList(),
+                              onChanged: (v) {
+                                if (v != null) { setState(() => _filtroVisita = v); _carregarEmpresas(); }
                               },
                             ),
                           ),

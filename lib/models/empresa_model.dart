@@ -1,5 +1,11 @@
+// lib/models/empresa_model.dart
+// CORRIGIDO:
+//  - fromFirestore() com null-check em dataAbertura (não crasha se campo ausente)
+//  - getStatusColor() usa cores consistentes com AppTheme
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import '../theme/app_theme.dart';
 
 class Empresa {
   final String id;
@@ -25,35 +31,35 @@ class Empresa {
   });
 
   factory Empresa.fromFirestore(DocumentSnapshot doc) {
-    Map data = doc.data() as Map;
+    final data = doc.data() as Map<String, dynamic>;
+
+    // FIX: null-safe parse de dataAbertura — campo ausente em cadastros manuais
+    DateTime dataAbertura;
+    final raw = data['dataAbertura'];
+    if (raw is Timestamp) {
+      dataAbertura = raw.toDate();
+    } else if (raw is String && raw.isNotEmpty) {
+      dataAbertura = DateTime.tryParse(raw) ?? DateTime(2000);
+    } else {
+      dataAbertura = DateTime(2000);
+    }
+
     return Empresa(
-      id: doc.id,
-      nome: data['nome'] ?? '',
-      cnpj: data['cnpj'] ?? '',
-      cnae: data['cnae'] ?? '',
+      id:            doc.id,
+      nome:          (data['nome']         ?? '').toString(),
+      cnpj:          (data['cnpj']         ?? '').toString(),
+      cnae:          (data['cnae']         ?? '').toString(),
       capitalSocial: (data['capitalSocial'] ?? 0).toDouble(),
-      status: data['status'] ?? 'leadFrio',
-      localizacao: data['localizacao'] ?? GeoPoint(0, 0),
-      dataAbertura: (data['dataAbertura'] as Timestamp).toDate(),
-      score: (data['score'] ?? 0).toDouble(),
+      status:        (data['status']       ?? 'leadFrio').toString(),
+      localizacao:   data['localizacao']   as GeoPoint? ?? const GeoPoint(0, 0),
+      dataAbertura:  dataAbertura,
+      score:         (data['score']        ?? 0).toDouble(),
     );
   }
 
-  // Cor baseada no Potencial (Score)
-  static Color getScoreColor(double score) {
-    if (score >= 80) return Colors.green;
-    if (score >= 50) return Colors.orange;
-    return Colors.red;
-  }
+  // FIX: delega para AppTheme.scoreColor — consistente com o resto do app
+  static Color getScoreColor(double score) => AppTheme.scoreColor(score);
 
-  // Cor baseada na Categoria (Status) - Proposta original
-  static Color getStatusColor(String status) {
-    switch (status) {
-      case 'clienteBB_Minha': return Colors.blue;      // 🔵 Cliente BB
-      case 'clienteBB_Outra': return Colors.yellow;    // 🟡 Outra Carteira
-      case 'concorrente': return Colors.red;          // 🔴 Concorrente
-      case 'novaOportunidade': return Colors.purple;   // 🟣 Nova Empresa
-      default: return Colors.grey;                    // ⚪ Lead Frio
-    }
-  }
+  // FIX: delega para AppTheme.statusColor — cores idênticas às do mapa e carteira
+  static Color getStatusColor(String status) => AppTheme.statusColor(status);
 }
