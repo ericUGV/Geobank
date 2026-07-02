@@ -4,10 +4,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:geolocator/geolocator.dart';
 import '../services/navigation_service.dart';
 import '../theme/app_theme.dart';
 import 'rota_multipla_screen.dart';
+import 'add_cliente_screen.dart';
 
 class MapaScreen extends StatefulWidget {
   @override
@@ -15,8 +17,8 @@ class MapaScreen extends StatefulWidget {
 }
 
 class _MapaScreenState extends State<MapaScreen> {
-  // FIX: StreamSubscription para cancelar antes de criar nova — evita memory leak e listeners duplos
   StreamSubscription<QuerySnapshot>? _subscription;
+  final String? _currentUserId = FirebaseAuth.instance.currentUser?.uid;
 
   Set<Marker> _markers = {};
   double _raioFiltro = 10000;
@@ -24,38 +26,9 @@ class _MapaScreenState extends State<MapaScreen> {
   String _filtroStatus = 'todos';
   String _filtroBanco = 'todos';
   String _filtroCnae = 'todos';
-  String _filtroVisita = 'todos'; // 'todos' | '7' | '30' | '90' | 'nunca'
+  String _filtroVisita = 'todos';
   bool _showFilters = false;
   int _totalVisible = 0;
-
-  // Segmentos CNAE principais (prefixo 2 dígitos)
-  final List<Map<String, String>> _cnaeOptions = [
-    {'key': 'todos', 'label': 'Todos os segmentos'},
-    {'key': '01',    'label': '01 · Agropecuária'},
-    {'key': '10',    'label': '10 · Alimentos'},
-    {'key': '41',    'label': '41-43 · Construção'},
-    {'key': '46',    'label': '46 · Atacadista'},
-    {'key': '47',    'label': '47 · Varejista'},
-    {'key': '49',    'label': '49 · Transporte'},
-    {'key': '56',    'label': '56 · Alimentação'},
-    {'key': '64',    'label': '64 · Financeiro'},
-    {'key': '68',    'label': '68 · Imobiliário'},
-    {'key': '86',    'label': '86 · Saúde'},
-  ];
-
-  final List<Map<String, String>> _visitaOptions = [
-    {'key': 'todos',  'label': 'Qualquer data'},
-    {'key': '7',      'label': 'Visitado nos últimos 7 dias'},
-    {'key': '30',     'label': 'Visitado nos últimos 30 dias'},
-    {'key': '90',     'label': 'Visitado nos últimos 90 dias'},
-    {'key': 'vencido','label': 'Sem visita há mais de 30 dias'},
-    {'key': 'nunca',  'label': 'Nunca visitado'},
-  ];
-
-  final List<String> _bancosDisponiveis = [
-    'todos', 'Banco do Brasil', 'Itaú', 'Bradesco',
-    'Caixa', 'Santander', 'Sicredi', 'Sicoob', 'Nubank', 'Outro',
-  ];
 
   final List<Map<String, dynamic>> _raioOptions = [
     {'label': '2km',  'value': 2000.0},
@@ -72,7 +45,6 @@ class _MapaScreenState extends State<MapaScreen> {
 
   @override
   void dispose() {
-    // FIX: cancela subscription ao sair da tela
     _subscription?.cancel();
     super.dispose();
   }
@@ -93,64 +65,47 @@ class _MapaScreenState extends State<MapaScreen> {
     _carregarEmpresas();
   }
 
-  double _getMarkerHue(String status) {
+  double _getMarkerHue(String status, String? gerenteId) {
+    // Lógica para diferenciar Minha Carteira de Outras
+    if (status == 'clienteBB_Minha' || status == 'clienteBB_Outra') {
+      if (gerenteId == _currentUserId) {
+        return BitmapDescriptor.hueAzure; // Azul para Minha Carteira
+      } else {
+        return BitmapDescriptor.hueYellow; // Amarelo para Outros Usuários
+      }
+    }
+    
     switch (status) {
-      case 'clienteBB_Minha':   return BitmapDescriptor.hueAzure;
-      case 'clienteBB_Outra':   return BitmapDescriptor.hueYellow;
       case 'concorrente':       return BitmapDescriptor.hueRed;
       case 'novaOportunidade':  return BitmapDescriptor.hueViolet;
-      default:                  return 200;
+      case 'leadFrio':          return BitmapDescriptor.hueMagenta;
+      default:                  return BitmapDescriptor.hueCyan;
     }
   }
 
   void _carregarEmpresas() {
-    // FIX: cancela a subscription anterior antes de criar uma nova
     _subscription?.cancel();
 
     _subscription = FirebaseFirestore.instance
         .collection('clientes')
         .snapshots()
         .listen((snapshot) {
-      // FIX: guarda resultado em variáveis locais, só chama setState se mounted
       final Set<Marker> localMarkers = {};
       int count = 0;
 
       for (final doc in snapshot.docs) {
         final data = doc.data();
         final GeoPoint? point = data['localizacao'];
-        if (point == null) continue;
+        if (point == null || (point.latitude == 0 && point.longitude == 0)) continue;
 
-        if (_filtroStatus != 'todos' && data['status'] != _filtroStatus) continue;
+        final status = data['status'] ?? '';
+        final gerenteId = data['gerenteId'];
 
-        if (_filtroBanco != 'todos') {
-          final banco = (data['bancoDomicilio'] ?? '').toString();
-          if (!banco.toLowerCase().contains(_filtroBanco.toLowerCase())) continue;
-        }
-
-        // FIX: filtro por segmento CNAE (prefixo 2 dígitos)
-        if (_filtroCnae != 'todos') {
-          final cnae = (data['cnae'] ?? '').toString();
-          if (!cnae.startsWith(_filtroCnae)) continue;
-        }
-
-        // FIX: filtro por data de última visita
-        if (_filtroVisita != 'todos') {
-          final ultimaVisita = data['ultimaVisita'];
-          final agora = DateTime.now();
-          if (_filtroVisita == 'nunca') {
-            if (ultimaVisita != null) continue;
-          } else if (_filtroVisita == 'vencido') {
-            if (ultimaVisita == null) continue;
-            DateTime? dt;
-            if (ultimaVisita is String) dt = DateTime.tryParse(ultimaVisita);
-            if (dt == null || agora.difference(dt).inDays <= 30) continue;
-          } else {
-            final dias = int.tryParse(_filtroVisita) ?? 9999;
-            if (ultimaVisita == null) continue;
-            DateTime? dt;
-            if (ultimaVisita is String) dt = DateTime.tryParse(ultimaVisita);
-            if (dt == null || agora.difference(dt).inDays > dias) continue;
-          }
+        // Lógica de filtro de status considerando propriedade
+        if (_filtroStatus != 'todos') {
+          if (_filtroStatus == 'clienteBB_Minha' && (status != 'clienteBB_Minha' || gerenteId != _currentUserId)) continue;
+          if (_filtroStatus == 'clienteBB_Outra' && (status != 'clienteBB_Outra' && status != 'clienteBB_Minha' || gerenteId == _currentUserId)) continue;
+          if (_filtroStatus != 'clienteBB_Minha' && _filtroStatus != 'clienteBB_Outra' && status != _filtroStatus) continue;
         }
 
         if (_minhaPosicao != null) {
@@ -165,18 +120,17 @@ class _MapaScreenState extends State<MapaScreen> {
         localMarkers.add(Marker(
           markerId: MarkerId(doc.id),
           position: LatLng(point.latitude, point.longitude),
-          icon: BitmapDescriptor.defaultMarkerWithHue(_getMarkerHue(data['status'] ?? '')),
+          icon: BitmapDescriptor.defaultMarkerWithHue(_getMarkerHue(status, gerenteId)),
           infoWindow: InfoWindow(
             title: data['nome'],
-            snippet: data['bancoDomicilio'] != null
-                ? '🏦 ${data['bancoDomicilio']} — Toque para navegar'
-                : 'Toque para navegar',
+            snippet: gerenteId == _currentUserId 
+                ? 'Sua Carteira - Toque para navegar' 
+                : 'Carteira de Outro Gerente',
             onTap: () => NavigationService.abrirRota(point, data['nome']),
           ),
         ));
       }
 
-      // FIX: mounted check antes do setState
       if (!mounted) return;
       setState(() {
         _markers = localMarkers;
@@ -188,7 +142,6 @@ class _MapaScreenState extends State<MapaScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.surface,
       body: Stack(
         children: [
           GoogleMap(
@@ -207,240 +160,37 @@ class _MapaScreenState extends State<MapaScreen> {
           SafeArea(
             child: Column(
               children: [
-                // Header
-                Container(
-                  margin: const EdgeInsets.all(12),
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 12, offset: const Offset(0, 4))],
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.map_outlined, color: AppColors.primary, size: 20),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('GPS de Prospecção',
-                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: AppColors.textPrimary)),
-                            Text(
-                              '$_totalVisible empresa(s) visível(is)'
-                                  '${_filtroBanco != 'todos' ? ' · $_filtroBanco' : ''}',
-                              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
-                            ),
-                          ],
-                        ),
-                      ),
-                      // Botão rota múltipla
-                      GestureDetector(
-                        onTap: () => Navigator.push(context,
-                            MaterialPageRoute(builder: (_) => const RotaMultiplaScreen())),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          margin: const EdgeInsets.only(right: 8),
-                          decoration: BoxDecoration(
-                            color: AppColors.accent.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: AppColors.accent.withOpacity(0.4)),
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.route, size: 15, color: AppColors.primary),
-                              SizedBox(width: 4),
-                              Text('Rota', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.primary)),
-                            ],
-                          ),
-                        ),
-                      ),
-                      // Botão filtros
-                      GestureDetector(
-                        onTap: () => setState(() => _showFilters = !_showFilters),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: _showFilters ? AppColors.primary : AppColors.surface,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: _showFilters ? AppColors.primary : AppColors.divider),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.tune, size: 16, color: _showFilters ? Colors.white : AppColors.textSecondary),
-                              const SizedBox(width: 4),
-                              Text('Filtros', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                                  color: _showFilters ? Colors.white : AppColors.textSecondary)),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                // Painel de filtros
-                if (_showFilters)
-                  Container(
-                    margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10, offset: const Offset(0, 4))],
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Raio de busca', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: _raioOptions.map((opt) {
-                            final sel = _raioFiltro == opt['value'];
-                            return Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: GestureDetector(
-                                onTap: () { setState(() => _raioFiltro = opt['value']); _carregarEmpresas(); },
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                                  decoration: BoxDecoration(
-                                    color: sel ? AppColors.primary : AppColors.surface,
-                                    borderRadius: BorderRadius.circular(20),
-                                    border: Border.all(color: sel ? AppColors.primary : AppColors.divider),
-                                  ),
-                                  child: Text(opt['label'], style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                                      color: sel ? Colors.white : AppColors.textSecondary)),
-                                ),
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                        const SizedBox(height: 14),
-                        const Text('Status', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                        const SizedBox(height: 8),
-                        Wrap(spacing: 8, runSpacing: 8, children: [
-                          _statusChip('todos',            'Todos',          AppColors.primary),
-                          _statusChip('clienteBB_Minha',  'Minha Carteira', AppColors.statusMinhaCarteira),
-                          _statusChip('clienteBB_Outra',  'Outra Carteira', AppColors.statusOutraCarteira),
-                          _statusChip('concorrente',       'Concorrente',    AppColors.statusConcorrente),
-                          _statusChip('novaOportunidade',  'Nova Empresa',   AppColors.statusNovaEmpresa),
-                          _statusChip('leadFrio',          'Lead Frio',      AppColors.statusLeadFrio),
-                        ]),
-                        const SizedBox(height: 14),
-                        const Text('Banco domicílio', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                        const SizedBox(height: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          decoration: BoxDecoration(
-                            color: AppColors.surface,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: AppColors.divider),
-                          ),
-                          child: DropdownButtonHideUnderline(
-                            child: DropdownButton<String>(
-                              isExpanded: true,
-                              value: _filtroBanco,
-                              items: _bancosDisponiveis.map((b) => DropdownMenuItem(
-                                value: b,
-                                child: Text(b == 'todos' ? 'Todos os bancos' : b,
-                                    style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
-                              )).toList(),
-                              onChanged: (v) {
-                                if (v != null) { setState(() => _filtroBanco = v); _carregarEmpresas(); }
-                              },
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 14),
-                        const Text('Segmento (CNAE)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                        const SizedBox(height: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          decoration: BoxDecoration(
-                            color: AppColors.surface,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: _filtroCnae != 'todos' ? AppColors.primary : AppColors.divider),
-                          ),
-                          child: DropdownButtonHideUnderline(
-                            child: DropdownButton<String>(
-                              isExpanded: true,
-                              value: _filtroCnae,
-                              items: _cnaeOptions.map((opt) => DropdownMenuItem(
-                                value: opt['key'],
-                                child: Text(opt['label']!,
-                                    style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
-                              )).toList(),
-                              onChanged: (v) {
-                                if (v != null) { setState(() => _filtroCnae = v); _carregarEmpresas(); }
-                              },
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 14),
-                        const Text('Última visita', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                        const SizedBox(height: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          decoration: BoxDecoration(
-                            color: AppColors.surface,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: _filtroVisita != 'todos' ? AppColors.primary : AppColors.divider),
-                          ),
-                          child: DropdownButtonHideUnderline(
-                            child: DropdownButton<String>(
-                              isExpanded: true,
-                              value: _filtroVisita,
-                              items: _visitaOptions.map((opt) => DropdownMenuItem(
-                                value: opt['key'],
-                                child: Text(opt['label']!,
-                                    style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
-                              )).toList(),
-                              onChanged: (v) {
-                                if (v != null) { setState(() => _filtroVisita = v); _carregarEmpresas(); }
-                              },
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                _buildHeader(),
+                if (_showFilters) _buildFilters(),
               ],
             ),
           ),
 
-          // Legenda
+          // Legenda Inferior
           Positioned(
             bottom: 20, left: 12, right: 12,
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(14),
-                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 10, offset: const Offset(0, -2))],
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _legendDot('Minha Cart.',  AppColors.statusMinhaCarteira),
-                  _legendDot('Outra Cart.',  AppColors.statusOutraCarteira),
-                  _legendDot('Concorrente',  AppColors.statusConcorrente),
-                  _legendDot('Nova Emp.',    AppColors.statusNovaEmpresa),
-                  _legendDot('Lead Frio',    AppColors.statusLeadFrio),
-                ],
-              ),
-            ),
+            child: _buildLegend(),
           ),
 
+          // Botão Adicionar Flutuante
           Positioned(
             bottom: 90, right: 16,
-            child: FloatingActionButton.small(
-              onPressed: _determinarPosicao,
-              backgroundColor: Colors.white,
-              foregroundColor: AppColors.primary,
-              elevation: 4,
-              child: const Icon(Icons.my_location),
+            child: Column(
+              children: [
+                FloatingActionButton.small(
+                  heroTag: 'loc',
+                  onPressed: _determinarPosicao,
+                  backgroundColor: Colors.white,
+                  child: const Icon(Icons.my_location, color: AppColors.primary),
+                ),
+                const SizedBox(height: 12),
+                FloatingActionButton(
+                  heroTag: 'add',
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => AddClienteScreen())),
+                  backgroundColor: AppColors.primary,
+                  child: const Icon(Icons.add, color: Colors.white),
+                ),
+              ],
             ),
           ),
         ],
@@ -448,29 +198,108 @@ class _MapaScreenState extends State<MapaScreen> {
     );
   }
 
-  Widget _statusChip(String key, String label, Color color) {
-    final sel = _filtroStatus == key;
-    return GestureDetector(
-      onTap: () { setState(() => _filtroStatus = key); _carregarEmpresas(); },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: sel ? color : Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: sel ? color : AppColors.divider),
-        ),
-        child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-            color: sel ? Colors.white : AppColors.textSecondary)),
+  Widget _buildHeader() {
+    return Container(
+      margin: const EdgeInsets.all(12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 10)],
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.radar, color: AppColors.primary),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Mapa de Prospecção', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text('$_totalVisible empresas encontradas', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: Icon(_showFilters ? Icons.close : Icons.filter_list),
+            onPressed: () => setState(() => _showFilters = !_showFilters),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _legendDot(String label, Color color) => Row(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-      const SizedBox(width: 4),
-      Text(label, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary)),
-    ],
-  );
+  Widget _buildFilters() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Filtrar por Status', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            children: [
+              _filterChip('todos', 'Todos'),
+              _filterChip('clienteBB_Minha', 'Minha Carteira'),
+              _filterChip('clienteBB_Outra', 'Outras Carteiras'),
+              _filterChip('novaOportunidade', 'Oportunidades'),
+            ],
+          ),
+          const SizedBox(height: 16),
+          const Text('Raio de Busca', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+          Row(
+            children: _raioOptions.map((opt) => Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ChoiceChip(
+                label: Text(opt['label']),
+                selected: _raioFiltro == opt['value'],
+                onSelected: (s) { if(s) setState(() => _raioFiltro = opt['value']); _carregarEmpresas(); },
+              ),
+            )).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _filterChip(String status, String label) {
+    return ChoiceChip(
+      label: Text(label),
+      selected: _filtroStatus == status,
+      onSelected: (s) { if(s) setState(() => _filtroStatus = status); _carregarEmpresas(); },
+    );
+  }
+
+  Widget _buildLegend() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 5)],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          _legendItem('Minha', Colors.blue),
+          _legendItem('Outros', Colors.yellow),
+          _legendItem('Nova', Colors.purple),
+          _legendItem('Concorrente', Colors.red),
+        ],
+      ),
+    );
+  }
+
+  Widget _legendItem(String label, Color color) {
+    return Row(
+      children: [
+        Icon(Icons.location_on, color: color, size: 16),
+        const SizedBox(width: 4),
+        Text(label, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+      ],
+    );
+  }
 }

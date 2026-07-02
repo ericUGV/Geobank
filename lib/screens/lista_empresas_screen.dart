@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../services/navigation_service.dart';
 import '../theme/app_theme.dart';
 import 'checkin_screen.dart';
@@ -13,11 +14,11 @@ class _ListaEmpresasScreenState extends State<ListaEmpresasScreen> {
   String _busca = "";
   String _filtroStatus = "todos";
   final TextEditingController _searchController = TextEditingController();
+  final String? _currentUserId = FirebaseAuth.instance.currentUser?.uid;
 
   final List<Map<String, String>> _statusOptions = [
     {'key': 'todos', 'label': 'Todos'},
     {'key': 'clienteBB_Minha', 'label': 'Minha Carteira'},
-    {'key': 'clienteBB_Outra', 'label': 'Outra Carteira'},
     {'key': 'concorrente', 'label': 'Concorrente'},
     {'key': 'novaOportunidade', 'label': 'Nova Empresa'},
     {'key': 'leadFrio', 'label': 'Lead Frio'},
@@ -37,9 +38,9 @@ class _ListaEmpresasScreenState extends State<ListaEmpresasScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text("Carteira de Clientes", style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
+                  const Text("Minha Carteira", style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 4),
-                  const Text("Gestão territorial de prospecção", style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  const Text("Gestão exclusiva dos seus clientes", style: TextStyle(color: Colors.white70, fontSize: 13)),
                   const SizedBox(height: 14),
                   // Search bar
                   TextField(
@@ -47,7 +48,7 @@ class _ListaEmpresasScreenState extends State<ListaEmpresasScreen> {
                     onChanged: (v) => setState(() => _busca = v.toLowerCase()),
                     style: const TextStyle(color: AppColors.textPrimary),
                     decoration: InputDecoration(
-                      hintText: "Pesquisar empresa...",
+                      hintText: "Pesquisar na minha carteira...",
                       hintStyle: const TextStyle(color: AppColors.textSecondary, fontSize: 14),
                       prefixIcon: const Icon(Icons.search, color: AppColors.textSecondary, size: 20),
                       suffixIcon: _busca.isNotEmpty
@@ -106,17 +107,24 @@ class _ListaEmpresasScreenState extends State<ListaEmpresasScreen> {
                     return const Center(child: CircularProgressIndicator(color: AppColors.primary));
                   }
                   if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                    return _emptyState("Nenhuma empresa cadastrada.", Icons.business_outlined);
+                    return _emptyState("Nenhuma empresa na sua carteira.", Icons.business_outlined);
                   }
 
+                  // Filtra para mostrar apenas clientes do usuário logado
                   var docs = snapshot.data!.docs.where((doc) {
                     final data = doc.data() as Map<String, dynamic>;
+                    
+                    // Verificação de Propriedade: apenas documentos do usuário atual
+                    final isMine = data['gerenteId'] == _currentUserId;
+                    if (!isMine) return false;
+
                     final nome = (data['nome'] ?? '').toString().toLowerCase();
                     final statusOk = _filtroStatus == 'todos' || data['status'] == _filtroStatus;
+                    
                     return nome.contains(_busca) && statusOk;
                   }).toList();
 
-                  if (docs.isEmpty) return _emptyState("Nenhum resultado encontrado.", Icons.search_off);
+                  if (docs.isEmpty) return _emptyState("Nenhum resultado encontrado na sua carteira.", Icons.search_off);
 
                   return ListView.builder(
                     padding: const EdgeInsets.all(16),

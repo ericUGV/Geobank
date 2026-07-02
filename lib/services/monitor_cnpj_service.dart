@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:geocoding/geocoding.dart';
 import 'score_service.dart';
+import 'google_places_service.dart';
 
 class EmpresaDetectada {
   final String cnpj;
@@ -31,6 +32,7 @@ class EmpresaDetectada {
   final String cidadeMonitorada;
   final DateTime detectadaEm;
   final double score;
+  final String? placeId; // Para identificar se veio do Google Maps
 
   EmpresaDetectada({
     required this.cnpj,
@@ -56,6 +58,7 @@ class EmpresaDetectada {
     required this.cidadeMonitorada,
     required this.detectadaEm,
     required this.score,
+    this.placeId,
   });
 
   String get enderecoCompleto {
@@ -98,11 +101,11 @@ class EmpresaDetectada {
     'detectadaEm': Timestamp.fromDate(detectadaEm),
     'visto': false,
     'origemMonitor': true,
+    'placeId': placeId,
   };
 
   factory EmpresaDetectada.fromApi(Map<String, dynamic> data, String cidade) {
     final capital   = (data['capital_social'] ?? 0).toDouble();
-    // FIX: safe null-aware toString para cnae_fiscal
     final cnae      = data['cnae_fiscal']?.toString() ?? '';
     final municipio = (data['municipio'] ?? cidade).toString();
     final uf        = (data['uf'] ?? '').toString();
@@ -138,6 +141,35 @@ class EmpresaDetectada {
     );
   }
 
+  factory EmpresaDetectada.fromGoogle(Map<String, dynamic> place, String cidade) {
+    return EmpresaDetectada(
+      cnpj: '',
+      razaoSocial: place['nome'] ?? '',
+      nomeFantasia: '',
+      cnae: '',
+      cnaeDescricao: '',
+      dataAbertura: 'Últimos 30 dias',
+      situacao: 'ATIVA',
+      naturezaJuridica: '',
+      porte: '',
+      capitalSocial: 0,
+      logradouro: place['endereco'] ?? '',
+      numero: '',
+      complemento: '',
+      bairro: '',
+      municipio: cidade,
+      uf: '',
+      cep: '',
+      telefone1: '',
+      telefone2: '',
+      email: '',
+      cidadeMonitorada: cidade,
+      detectadaEm: DateTime.now(),
+      score: 55.0, // Score médio para locais do Google
+      placeId: place['place_id'],
+    );
+  }
+
   factory EmpresaDetectada.fromFirestore(Map<String, dynamic> data) {
     return EmpresaDetectada(
       cnpj:             (data['cnpj'] ?? '').toString(),
@@ -167,6 +199,7 @@ class EmpresaDetectada {
           ? (data['detectadaEm'] as Timestamp).toDate()
           : DateTime.now(),
       score:            (data['score'] ?? 0).toDouble(),
+      placeId:          data['placeId'],
     );
   }
 
@@ -244,12 +277,26 @@ class MonitorCnpjService {
     int novas = 0;
     for (final cidade in cidades) {
       try {
+        // 1. Monitor CNPJ (Receita Federal)
         final empresas = await _buscarNovasEmpresas(cidade);
         for (final empresa in empresas) {
           if (await _jaExiste(empresa.cnpj)) continue;
-          // FIX: geocodifica UMA vez e reutiliza em ambas as coleções
           final geo = await _geocodificar(empresa);
           await _salvarDetectada(empresa, geo);
+          await _salvarNaCarteira(empresa, geo);
+          novas++;
+        }
+
+        // 2. Monitor Google Maps (Novos locais registrados)
+        final locaisGoogle = await _buscarNovasNoGoogle(cidade);
+        for (final local in locaisGoogle) {
+          if (await _jaExisteGoogle(local['place_id'])) continue;
+          
+          final empresa = EmpresaDetectada.fromGoogle(local, cidade);
+          final geo = GeoPoint(local['lat'], local['lng']);
+          
+          await _salvarDetectada(empresa, geo);
+          // Opcional: Salvar na carteira automaticamente como "Nova Oportunidade"
           await _salvarNaCarteira(empresa, geo);
           novas++;
         }
@@ -259,10 +306,11 @@ class MonitorCnpjService {
   }
 
   static Future<List<EmpresaDetectada>> _buscarNovasEmpresas(String cidade) async {
+    // Busca empresas abertas nos últimos 30 dias (lógica simplificada via API)
+    // Para fins de monitoramento contínuo, as APIs retornam as mais recentes
     final hoje    = DateTime.now();
     final dataStr = '${hoje.year}-${hoje.month.toString().padLeft(2,'0')}-${hoje.day.toString().padLeft(2,'0')}';
 
-    // Tentativa 1: BrasilAPI search
     try {
       final url = Uri.parse(
           '$_brasilApi/search?municipio=${Uri.encodeComponent(cidade.toUpperCase())}'
@@ -276,21 +324,12 @@ class MonitorCnpjService {
       }
     } catch (_) {}
 
-    // Tentativa 2: CNPJ.ws
-    try {
-      final url = Uri.parse(
-          'https://www.cnpj.ws/cnpj/search?q=${Uri.encodeComponent(cidade)}'
-              '&data_abertura=$dataStr&size=20');
-      final res = await http.get(url, headers: {'Accept': 'application/json'})
-          .timeout(const Duration(seconds: 12));
-      if (res.statusCode == 200) {
-        final body = json.decode(res.body);
-        final lista = body is List ? body : (body['data'] ?? const []);
-        if (lista is List && lista.isNotEmpty) return _enriquecerLista(lista, cidade);
-      }
-    } catch (_) {}
-
     return [];
+  }
+
+  static Future<List<Map<String, dynamic>>> _buscarNovasNoGoogle(String cidade) async {
+    // Busca no Google Maps por termos que indicam novos locais
+    return await GooglePlacesService.buscarEmpresas("novas empresas em $cidade");
   }
 
   static Future<List<EmpresaDetectada>> _enriquecerLista(List<dynamic> lista, String cidade) async {
@@ -310,7 +349,6 @@ class MonitorCnpjService {
   static Future<EmpresaDetectada?> _buscarCnpjCompleto(String cnpj, String cidade) async {
     final clean = cnpj.replaceAll(RegExp(r'[^0-9]'), '');
 
-    // BrasilAPI
     try {
       final res = await http.get(Uri.parse('$_brasilApi/$clean')).timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
@@ -318,97 +356,58 @@ class MonitorCnpjService {
       }
     } catch (_) {}
 
-    // CNPJ.ws
-    try {
-      final res = await http.get(Uri.parse('$_cnpjWsBase/$clean'), headers: {'Accept': 'application/json'})
-          .timeout(const Duration(seconds: 10));
-      if (res.statusCode == 200) {
-        return EmpresaDetectada.fromApi(_normalizarCnpjWs(json.decode(res.body)), cidade);
-      }
-    } catch (_) {}
-
     return null;
   }
 
-  /// FIX: garante que 'end' venha de 'estabelecimento' se existir, senão usa Map vazio
-  /// (não faz fallback para raw, pois raw tem estrutura diferente e causaria lookups errados)
-  static Map<String, dynamic> _normalizarCnpjWs(Map<String, dynamic> raw) {
-    final end = (raw['estabelecimento'] as Map<String, dynamic>?) ?? {};
-    return {
-      'cnpj':                         raw['taxId']                          ?? raw['cnpj']           ?? '',
-      'razao_social':                 raw['company']?['name']               ?? raw['razao_social']   ?? '',
-      'nome_fantasia':                end['alias']                          ?? raw['nome_fantasia']  ?? '',
-      'cnae_fiscal':                  end['mainActivity']?['id']?.toString() ?? raw['cnae_fiscal']?.toString() ?? '',
-      'cnae_fiscal_descricao':        end['mainActivity']?['text']          ?? '',
-      'data_inicio_atividade':        end['startDate']                      ?? '',
-      'descricao_situacao_cadastral': end['status']?['text']                ?? '',
-      'descricao_natureza_juridica':  raw['company']?['nature']?['text']    ?? '',
-      'descricao_porte':              raw['company']?['size']?['text']      ?? '',
-      'capital_social':               raw['company']?['equity']             ?? 0,
-      'logradouro':                   end['street']                         ?? '',
-      'numero':                       end['number']                         ?? '',
-      'complemento':                  end['details']                        ?? '',
-      'bairro':                       end['district']                       ?? '',
-      'municipio':                    end['city']?['name']                  ?? '',
-      'uf':                           end['state']?['acronym']              ?? '',
-      'cep':                          end['zip']                            ?? '',
-      'ddd_telefone_1':               _extrairTelefone(end['phones'], 0),
-      'ddd_telefone_2':               _extrairTelefone(end['phones'], 1),
-      'email':                        end['email']                          ?? '',
-    };
-  }
-
-  static String _extrairTelefone(dynamic phones, int index) {
-    if (phones is! List || phones.length <= index) return '';
-    final p   = phones[index] as Map<String, dynamic>? ?? {};
-    final area = p['area']?.toString() ?? '';
-    final num  = p['number']?.toString() ?? '';
-    return area.isNotEmpty ? '($area) $num' : num;
-  }
-
   static Future<bool> _jaExiste(String cnpj) async {
+    if (cnpj.isEmpty) return false;
     final snap = await FirebaseFirestore.instance
         .collection(_colDetectadas).where('cnpj', isEqualTo: cnpj).limit(1).get();
     return snap.docs.isNotEmpty;
   }
 
-  // FIX: recebe GeoPoint já calculado — evita geocodificar 2x a mesma empresa
+  static Future<bool> _jaExisteGoogle(String? placeId) async {
+    if (placeId == null || placeId.isEmpty) return false;
+    final snap = await FirebaseFirestore.instance
+        .collection(_colDetectadas).where('placeId', isEqualTo: placeId).limit(1).get();
+    return snap.docs.isNotEmpty;
+  }
+
   static Future<void> _salvarDetectada(EmpresaDetectada empresa, GeoPoint geo) async {
     await FirebaseFirestore.instance.collection(_colDetectadas).add(empresa.toFirestore(geo));
   }
 
   static Future<void> _salvarNaCarteira(EmpresaDetectada empresa, GeoPoint geo) async {
-    final existe = await FirebaseFirestore.instance
-        .collection('clientes').where('cnpj', isEqualTo: empresa.cnpj).limit(1).get();
+    // Evita duplicidade na carteira de clientes
+    Query query;
+    if (empresa.cnpj.isNotEmpty) {
+      query = FirebaseFirestore.instance.collection('clientes').where('cnpj', isEqualTo: empresa.cnpj);
+    } else if (empresa.placeId != null) {
+      query = FirebaseFirestore.instance.collection('clientes').where('placeId', isEqualTo: empresa.placeId);
+    } else {
+      return;
+    }
+
+    final existe = await query.limit(1).get();
     if (existe.docs.isNotEmpty) return;
 
     await FirebaseFirestore.instance.collection('clientes').add({
       'nome':             empresa.razaoSocial,
       'nomeFantasia':     empresa.nomeFantasia,
       'cnpj':             empresa.cnpj,
+      'placeId':          empresa.placeId,
       'cnae':             empresa.cnaeDescricao.isNotEmpty ? empresa.cnaeDescricao : empresa.cnae,
       'capitalSocial':    empresa.capitalSocial,
       'status':           'novaOportunidade',
       'localizacao':      geo,
-      'dataAbertura':     empresa.dataAbertura.isNotEmpty
-          ? Timestamp.fromDate(DateTime.tryParse(empresa.dataAbertura) ?? DateTime.now())
-          : Timestamp.now(),
+      'dataAbertura':     empresa.dataAbertura,
       'score':            empresa.score,
       'logradouro':       empresa.logradouro,
-      'numero':           empresa.numero,
-      'complemento':      empresa.complemento,
-      'bairro':           empresa.bairro,
       'municipio':        empresa.municipio,
       'uf':               empresa.uf,
-      'cep':              empresa.cep,
       'enderecoCompleto': empresa.enderecoCompleto,
-      'telefone':         empresa.telefone1,
-      'telefone2':        empresa.telefone2,
-      'email':            empresa.email,
-      'naturezaJuridica': empresa.naturezaJuridica,
-      'porte':            empresa.porte,
-      'situacao':         empresa.situacao,
       'origemMonitor':    true,
+      'detectadaEm':      FieldValue.serverTimestamp(),
     });
   }
 
@@ -421,14 +420,10 @@ class MonitorCnpjService {
     return const GeoPoint(0, 0);
   }
 
-  // ── Adicionar manualmente à carteira ──────────────────────────────────────
-
   static Future<void> adicionarACarteira(EmpresaDetectada empresa) async {
     final geo = await _geocodificar(empresa);
     await _salvarNaCarteira(empresa, geo);
   }
-
-  // ── Consulta avulsa ────────────────────────────────────────────────────────
 
   static Future<EmpresaDetectada?> consultarCnpj(String cnpj) async {
     return _buscarCnpjCompleto(cnpj, '');
