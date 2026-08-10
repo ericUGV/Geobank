@@ -7,6 +7,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../theme/app_theme.dart';
 import '../services/monitor_cnpj_service.dart';
+import 'pesquisa_avancada_screen.dart';
+import 'pesquisa_google_screen.dart';
 
 class MonitorScreen extends StatefulWidget {
   const MonitorScreen({super.key});
@@ -572,6 +574,49 @@ class _MonitorScreenState extends State<MonitorScreen>
               child: _consultando
                   ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
                   : const Icon(Icons.search),
+            ),
+          ],
+        ),
+
+        const SizedBox(height: 16),
+        
+        // Botões de Pesquisa Avançada
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => Navigator.push(
+                  context, 
+                  MaterialPageRoute(builder: (_) => const PesquisaAvancadaScreen())
+                ),
+                icon: const Icon(Icons.business_center),
+                label: const Text('Casa dos Dados'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.primary,
+                  side: const BorderSide(color: AppColors.primary),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  textStyle: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => Navigator.push(
+                  context, 
+                  MaterialPageRoute(builder: (_) => const PesquisaGoogleScreen())
+                ),
+                icon: const Icon(Icons.place),
+                label: const Text('Google Maps'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.blue[800],
+                  side: BorderSide(color: Colors.blue[800]!),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  textStyle: const TextStyle(fontSize: 12),
+                ),
+              ),
             ),
           ],
         ),

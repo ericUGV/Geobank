@@ -5,23 +5,35 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 class GooglePlacesService {
   // Chave extraída do AndroidManifest.xml
-  static const String _apiKey = 'AIzaSyA6mg6A35NyN9FJf3BtZFFmCnGI7I60LLs';
+  static const String _apiKey = 'AIzaSyB6NzDSYQmGEaPSeEMRe_GvOiTRuP1mTIU';
 
-  static Future<List<Map<String, dynamic>>> buscarEmpresas(String query, {LatLng? userLocation}) async {
-    if (query.isEmpty) return [];
+  static Future<List<Map<String, dynamic>>> buscarEmpresas(String query, {LatLng? userLocation, String? type}) async {
+    if (query.isEmpty && type == null) return [];
 
     String url = 'https://maps.googleapis.com/maps/api/place/textsearch/json?query=$query&key=$_apiKey&language=pt-BR';
     
+    if (type != null && type.isNotEmpty) {
+      url += '&type=$type';
+    }
+
     if (userLocation != null) {
       url += '&location=${userLocation.latitude},${userLocation.longitude}&radius=10000';
     }
 
     try {
-      final response = await http.get(Uri.parse(url));
+      print('Buscando no Google Maps: $url');
+      final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 15));
+      
+      print('Resposta Google Maps (Status: ${response.statusCode}): ${response.body}');
+
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         final results = data['results'] as List;
         
+        if (data['status'] != 'OK' && data['status'] != 'ZERO_RESULTS') {
+          print('Erro retornado pelo Google: ${data['status']} - ${data['error_message'] ?? 'Sem mensagem'}');
+        }
+
         return results.map((item) {
           return {
             'place_id': item['place_id'],

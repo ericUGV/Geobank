@@ -7,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:geocoding/geocoding.dart';
 import 'score_service.dart';
 import 'google_places_service.dart';
+import 'casa_dos_dados_service.dart';
 
 class EmpresaDetectada {
   final String cnpj;
@@ -32,7 +33,7 @@ class EmpresaDetectada {
   final String cidadeMonitorada;
   final DateTime detectadaEm;
   final double score;
-  final String? placeId; // Para identificar se veio do Google Maps
+  final String? placeId; 
 
   EmpresaDetectada({
     required this.cnpj,
@@ -141,6 +142,41 @@ class EmpresaDetectada {
     );
   }
 
+  factory EmpresaDetectada.fromCasaDosDados(Map<String, dynamic> data, String cidade) {
+    // Casa dos Dados retorna campos diferentes, ajustar conforme documentação
+    final cnpj = (data['cnpj'] ?? '').toString().replaceAll(RegExp(r'[^0-9]'), '');
+    return EmpresaDetectada(
+      cnpj: cnpj,
+      razaoSocial: data['razao_social'] ?? '',
+      nomeFantasia: data['nome_fantasia'] ?? '',
+      cnae: data['cnae_principal_codigo']?.toString() ?? '',
+      cnaeDescricao: data['cnae_principal_descricao'] ?? '',
+      dataAbertura: data['data_abertura'] ?? '',
+      situacao: data['situacao_cadastral'] ?? 'ATIVA',
+      naturezaJuridica: data['natureza_juridica'] ?? '',
+      porte: data['porte'] ?? '',
+      capitalSocial: (data['capital_social'] ?? 0).toDouble(),
+      logradouro: data['logradouro'] ?? '',
+      numero: data['numero'] ?? '',
+      complemento: data['complemento'] ?? '',
+      bairro: data['bairro'] ?? '',
+      municipio: data['municipio'] ?? cidade,
+      uf: data['uf'] ?? '',
+      cep: data['cep'] ?? '',
+      telefone1: _parseTelefone(data, 'telefone_1'),
+      telefone2: _parseTelefone(data, 'telefone_2'),
+      email: data['email'] ?? '',
+      cidadeMonitorada: cidade,
+      detectadaEm: DateTime.now(),
+      score: ScoreService.calcularScore(
+        capitalSocial: (data['capital_social'] ?? 0).toDouble(),
+        cnae: data['cnae_principal_codigo']?.toString() ?? '',
+        municipio: data['municipio'] ?? cidade,
+        uf: data['uf'] ?? '',
+      ),
+    );
+  }
+
   factory EmpresaDetectada.fromGoogle(Map<String, dynamic> place, String cidade) {
     return EmpresaDetectada(
       cnpj: '',
@@ -165,7 +201,7 @@ class EmpresaDetectada {
       email: '',
       cidadeMonitorada: cidade,
       detectadaEm: DateTime.now(),
-      score: 55.0, // Score médio para locais do Google
+      score: 55.0, 
       placeId: place['place_id'],
     );
   }
@@ -217,11 +253,8 @@ class EmpresaDetectada {
 
 class MonitorCnpjService {
   static const String _brasilApi   = 'https://brasilapi.com.br/api/cnpj/v1';
-  static const String _cnpjWsBase  = 'https://www.cnpj.ws/cnpj';
   static const _colMonitor    = 'monitor_cidades';
   static const _colDetectadas = 'empresas_detectadas';
-
-  // ── Cidades ────────────────────────────────────────────────────────────────
 
   static Stream<List<String>> streamCidades() {
     return FirebaseFirestore.instance
@@ -235,8 +268,6 @@ class MonitorCnpjService {
       SetOptions(merge: true),
     );
   }
-
-  // ── Streams ────────────────────────────────────────────────────────────────
 
   static Stream<List<Map<String, dynamic>>> streamDetectadas() {
     return FirebaseFirestore.instance
@@ -271,13 +302,11 @@ class MonitorCnpjService {
     await FirebaseFirestore.instance.collection(_colDetectadas).doc(docId).delete();
   }
 
-  // ── Verificação ────────────────────────────────────────────────────────────
-
   static Future<int> verificar(List<String> cidades) async {
     int novas = 0;
     for (final cidade in cidades) {
       try {
-        // 1. Monitor CNPJ (Receita Federal)
+        // 1. Monitor CNPJ (BrasilAPI)
         final empresas = await _buscarNovasEmpresas(cidade);
         for (final empresa in empresas) {
           if (await _jaExiste(empresa.cnpj)) continue;
@@ -287,16 +316,29 @@ class MonitorCnpjService {
           novas++;
         }
 
-        // 2. Monitor Google Maps (Novos locais registrados)
+        // 2. Monitor Casa dos Dados (Nova API)
+        // Tentamos buscar sem UF primeiro, ou se falhar, apenas ignoramos se a API exigir UF
+        try {
+          final empresasCasa = await CasaDosDadosService.pesquisarAvancada(municipio: cidade);
+          for (final item in empresasCasa) {
+            final empresa = EmpresaDetectada.fromCasaDosDados(item, cidade);
+            if (await _jaExiste(empresa.cnpj)) continue;
+            final geo = await _geocodificar(empresa);
+            await _salvarDetectada(empresa, geo);
+            await _salvarNaCarteira(empresa, geo);
+            novas++;
+          }
+        } catch (e) {
+          print('Erro no monitoramento Casa dos Dados para $cidade: $e');
+        }
+
+        // 3. Monitor Google Maps
         final locaisGoogle = await _buscarNovasNoGoogle(cidade);
         for (final local in locaisGoogle) {
           if (await _jaExisteGoogle(local['place_id'])) continue;
-          
           final empresa = EmpresaDetectada.fromGoogle(local, cidade);
           final geo = GeoPoint(local['lat'], local['lng']);
-          
           await _salvarDetectada(empresa, geo);
-          // Opcional: Salvar na carteira automaticamente como "Nova Oportunidade"
           await _salvarNaCarteira(empresa, geo);
           novas++;
         }
@@ -306,8 +348,6 @@ class MonitorCnpjService {
   }
 
   static Future<List<EmpresaDetectada>> _buscarNovasEmpresas(String cidade) async {
-    // Busca empresas abertas nos últimos 30 dias (lógica simplificada via API)
-    // Para fins de monitoramento contínuo, as APIs retornam as mais recentes
     final hoje    = DateTime.now();
     final dataStr = '${hoje.year}-${hoje.month.toString().padLeft(2,'0')}-${hoje.day.toString().padLeft(2,'0')}';
 
@@ -328,7 +368,6 @@ class MonitorCnpjService {
   }
 
   static Future<List<Map<String, dynamic>>> _buscarNovasNoGoogle(String cidade) async {
-    // Busca no Google Maps por termos que indicam novos locais
     return await GooglePlacesService.buscarEmpresas("novas empresas em $cidade");
   }
 
@@ -348,14 +387,12 @@ class MonitorCnpjService {
 
   static Future<EmpresaDetectada?> _buscarCnpjCompleto(String cnpj, String cidade) async {
     final clean = cnpj.replaceAll(RegExp(r'[^0-9]'), '');
-
     try {
       final res = await http.get(Uri.parse('$_brasilApi/$clean')).timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
         return EmpresaDetectada.fromApi(json.decode(res.body) as Map<String, dynamic>, cidade);
       }
     } catch (_) {}
-
     return null;
   }
 
@@ -378,7 +415,6 @@ class MonitorCnpjService {
   }
 
   static Future<void> _salvarNaCarteira(EmpresaDetectada empresa, GeoPoint geo) async {
-    // Evita duplicidade na carteira de clientes
     Query query;
     if (empresa.cnpj.isNotEmpty) {
       query = FirebaseFirestore.instance.collection('clientes').where('cnpj', isEqualTo: empresa.cnpj);
